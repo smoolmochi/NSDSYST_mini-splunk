@@ -17,6 +17,9 @@ SYSLOG_PATTERN = re.compile(
     r"(?P<message>.*)$"                                        # rest of msg
 )
 
+PURGE_EXCHANGE = "purge_control"  #change to whatever
+paused = False
+
 def parse_syslog_line(line):
     is_match = SYSLOG_PATTERN.match(line)
     if not is_match:
@@ -52,6 +55,11 @@ def save_to_mongo(parsed_log, raw_line):
         return False
 
 def callback(ch, method, properties, body):
+    global paused
+    if paused:
+        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+        return
+    
     line = body.decode("utf-8")
     parsed = parse_syslog_line(line)
 
@@ -65,7 +73,18 @@ def callback(ch, method, properties, body):
     # only ack AFTER the save — this is what makes it survive a crash mid-job
     ch.basic_ack(delivery_tag=method.delivery_tag)
 
-## Missing Purge Logic
+def control_callback(ch, method, properties, body):
+    global paused
+    command = body.decode("utf-8").strip().upper()
+ 
+    if command == "LOCK":
+        paused = True
+        print(" [!] PURGE in progress — paused ingest processing")
+    elif command == "UNLOCK":
+        paused = False
+        print(" [*] PURGE finished — resumed ingest processing")
+    else:
+        print(f" [?] Unrecognized control message: {command}")
 
 def main():
     credentials = pika.PlainCredentials('rabbituser', 'rabbit1234')
@@ -78,6 +97,13 @@ def main():
     channel.basic_qos(prefetch_count=1)
     channel.basic_consume(queue='ingest_queue', on_message_callback=callback, auto_ack=False)
 
+    channel.exchange_declare(exchange=PURGE_EXCHANGE, exchange_type='fanout')
+    # Exclusive, auto-named queue: each worker gets its own copy of every broadcast.
+    result = channel.queue_declare(queue='', exclusive=True)
+    control_queue_name = result.method.queue
+    channel.queue_bind(exchange=PURGE_EXCHANGE, queue=control_queue_name)
+    channel.basic_consume(queue=control_queue_name, on_message_callback=control_callback, auto_ack=True)
+    
     print(" [*] Worker ready, waiting for log lines...")
     channel.start_consuming()
 

@@ -11,7 +11,7 @@ sent = 0
 failed = 0
 with open('SVR1_server_auth_syslog.txt') as f:
     for i, line in enumerate(f):
-        if i >= 500:
+        if i >= 25000:
             break
         try:
             channel.basic_publish(exchange='', routing_key='ingest_queue', body=line.strip())
