@@ -1,5 +1,6 @@
 import pika
 import json
+import re
 
 SYSLOG_PATTERN = re.compile(
     r"^(?P<timestamp>[A-Za-z]{3}\s+\d+\s+\d{2}:\d{2}:\d{2})\s+" # Feb 22 00:05:38
