@@ -4,6 +4,8 @@ import pika
 import pymongo
 import re
 import shlex
+import time
+import json
 
 HOST = "0.0.0.0"
 PORT = 8080
@@ -14,7 +16,12 @@ RABBITMQ_HOST = "127.0.0.1"
 RABBITMQ_PORT = 5672
 RABBITMQ_USER = "rabbituser"
 RABBITMQ_PASSWORD = "rabbit1234"
+
 INGEST_QUEUE = "ingest_queue"
+PURGE_EXCHANGE = "purge_control"
+PURGE_ACK_QUEUE = "purge_ack_queue"
+EXPECTED_WORKERS = 1
+PURGE_TIMEOUT_SECONDS = 10
 
 MONGO_URI = "mongodb://127.0.0.1:27017"
 MONGO_DATABASE = "mini_splunk"
@@ -49,6 +56,71 @@ def connect_to_rabbitmq():
     channel.queue_declare(queue=INGEST_QUEUE)
 
     return connection, channel
+
+def perform_purge():
+    rabbit_connection = None
+    channel = None
+    lock_sent = False
+    unlock_sent = False
+
+    try:
+        rabbit_connection, channel = connect_to_rabbitmq()
+
+        channel.exchange_declare(exchange=PURGE_EXCHANGE, exchange_type="fanout")
+        channel.queue_declare(queue=PURGE_ACK_QUEUE)
+        channel.queue_purge(queue=PURGE_ACK_QUEUE) # remove acks from previous
+        channel.basic_publish(exchange=PURGE_EXCHANGE, routing_key="", body="LOCK")
+        lock_sent = True
+
+        print("[PURGE] Lock sent. Waiting for workers...")
+
+        locked_workers = set()
+        deadline = time.time() + PURGE_TIMEOUT_SECONDS
+
+        while (len(locked_workers) < EXPECTED_WORKERS and time.time() < deadline):
+            method, properties, body = channel.basic_get(queue=PURGE_ACK_QUEUE, auto_ack=False)
+
+            if method is None:
+                time.sleep(0.1)
+                continue
+
+            acknowledgement = json.loads(body.decode(FORMAT))
+
+            if acknowledgement.get("status") == "LOCKED":
+                worker_id = acknowledgement.get("worker_id")
+
+                if worker_id:
+                    locked_workers.add(worker_id)
+                    print(f"[PURGE] {worker_id} is locked.")
+
+            channel.basic_ack(delivery_tag=method.delivery_tag)
+
+        if len(locked_workers) < EXPECTED_WORKERS:
+            raise TimeoutError("Not all workers confirmed LOCK.")
+
+        # delete messages that have not reached a worker
+        queue_result = channel.queue_purge(queue=INGEST_QUEUE)
+        queued_deleted = queue_result.method.message_count
+
+        # delete parse logs from MongoDB
+        database_result = logs_collection.delete_many({})
+        stored_deleted = database_result.deleted_count
+
+        # allow workers to consume again
+        channel.basic_publish(exchange=PURGE_EXCHANGE, routing_key="", body="UNLOCK")
+        unlock_sent = True
+
+        return queued_deleted, stored_deleted
+
+    finally:
+        if (channel is not None and rabbit_connection and rabbit_connection.is_open and lock_sent and not unlock_sent):
+            try:
+                channel.basic_publish(exchange=PURGE_EXCHANGE, routing_key="", body="UNLOCK")
+            except pika.exceptions.AMQPError as error:
+                print(f"[PURGE ERROR] Could not send emergency UNLOCK: {error}")
+
+        if rabbit_connection and rabbit_connection.is_open:
+            rabbit_connection.close()
 
 def search_logs(field, search_term, exact_match=True):
     escaped_term = re.escape(search_term)
@@ -246,6 +318,30 @@ def handle_client(conn, addr):
             send_with_length(conn, response)
             return
 
+        if action == "PURGE":
+            if len(parts) != 2:
+                send_with_length(conn, "[ERROR] Invalid PURGE command.")
+                return
+
+            try:
+                queued_deleted, stored_deleted = perform_purge()
+
+                response = (
+                    f"[SUCCESS] Purge completed. "
+                    f"{queued_deleted} queued messages and "
+                    f"{stored_deleted} stored logs were deleted."
+                )
+
+            except TimeoutError as error:
+                response = f"[ERROR] Purge failed: {error}"
+
+            except Exception as error:
+                print(f"[PURGE ERROR] {error}")
+                response = "[ERROR] Purge failed because of an internal error."
+
+            send_with_length(conn, response)
+            return
+        
         if action != "INGEST":
             send_with_length(conn, f"[ERROR] Unknown command '{action}'.")
             return

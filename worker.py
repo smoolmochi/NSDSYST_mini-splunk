@@ -115,25 +115,41 @@ def control_callback(ch, method, properties, body):
         print(f" [?] Unrecognized control message: {command}")
 
 def main():
-    credentials = pika.PlainCredentials('rabbituser', 'rabbit1234')
-    connection = pika.BlockingConnection(
-        pika.ConnectionParameters(RABBITMQ_HOST, 5672, '/', credentials))
-    channel = connection.channel()
-    channel.queue_declare(queue='ingest_queue')
-    channel.queue_declare(queue=PURGE_ACK_QUEUE)
+    connection = None
 
-    # process one message at a time per worker, so work spreads across workers
-    channel.basic_qos(prefetch_count=1)
-    channel.basic_consume(queue='ingest_queue', on_message_callback=callback, auto_ack=False, consumer_tag=INGEST_CONSUMER_TAG)
-    channel.exchange_declare(exchange=PURGE_EXCHANGE, exchange_type='fanout')
-    # Exclusive, auto-named queue: each worker gets its own copy of every broadcast.
-    result = channel.queue_declare(queue='', exclusive=True)
-    control_queue_name = result.method.queue
-    channel.queue_bind(exchange=PURGE_EXCHANGE, queue=control_queue_name)
-    channel.basic_consume(queue=control_queue_name, on_message_callback=control_callback, auto_ack=True)
-    
-    print(" [*] Worker ready, waiting for log lines...")
-    channel.start_consuming()
+    try:
+        credentials = pika.PlainCredentials('rabbituser', 'rabbit1234')
+        connection = pika.BlockingConnection(
+            pika.ConnectionParameters(RABBITMQ_HOST, 5672, '/', credentials))
+        channel = connection.channel()
+        channel.queue_declare(queue='ingest_queue')
+        channel.queue_declare(queue=PURGE_ACK_QUEUE)
+
+        # process one message at a time per worker, so work spreads across workers
+        channel.basic_qos(prefetch_count=1)
+        channel.basic_consume(queue='ingest_queue', on_message_callback=callback, auto_ack=False, consumer_tag=INGEST_CONSUMER_TAG)
+        channel.exchange_declare(exchange=PURGE_EXCHANGE, exchange_type='fanout')
+        # Exclusive, auto-named queue: each worker gets its own copy of every broadcast.
+        result = channel.queue_declare(queue='', exclusive=True)
+        control_queue_name = result.method.queue
+        channel.queue_bind(exchange=PURGE_EXCHANGE, queue=control_queue_name)
+        channel.basic_consume(queue=control_queue_name, on_message_callback=control_callback, auto_ack=True)
+        
+        print(" [*] Worker ready, waiting for log lines...")
+        channel.start_consuming()
+        
+    except KeyboardInterrupt:
+        print("\n[SHUTDOWN] Worker interrupted by user.")
+
+    except pika.exceptions.AMQPError as error:
+        print(f"\n[RABBITMQ ERROR] {error}")
+
+    finally:
+        if connection and connection.is_open:
+            connection.close()
+
+        mongo_client.close()
+        print("[SHUTDOWN] Worker stopped cleanly.")
 
 if __name__ == '__main__':
     main()
