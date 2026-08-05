@@ -9,21 +9,23 @@ import json
 import uuid
 import os
 
-HOST = "0.0.0.0"
-PORT = 8080
+HOST = os.getenv("GATEWAY_HOST", "0.0.0.0")
+PORT = int(os.getenv("GATEWAY_PORT", "8080"))
 SIZE = 1024
 FORMAT = "utf-8"
 
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "127.0.0.1")
 RABBITMQ_PORT = int(os.getenv("RABBITMQ_PORT", "5672"))
-RABBITMQ_USER = "rabbituser"
-RABBITMQ_PASSWORD = "rabbit1234"
+RABBITMQ_USER = os.getenv("RABBITMQ_USER", "rabbituser")
+
+RABBITMQ_PASSWORD = os.getenv("RABBITMQ_PASSWORD", "rabbit1234")
+
 
 INGEST_QUEUE = "ingest_queue"
 PURGE_EXCHANGE = "purge_control"
 PURGE_ACK_QUEUE = "purge_ack_queue"
-EXPECTED_WORKERS = 1
-PURGE_TIMEOUT_SECONDS = 10
+EXPECTED_WORKERS = int(os.getenv("EXPECTED_WORKERS", "1"))
+PURGE_TIMEOUT_SECONDS = float(os.getenv("PURGE_TIMEOUT_SECONDS", "10"))
 
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://127.0.0.1:27017")
 MONGO_DATABASE = "mini_splunk"
@@ -31,6 +33,9 @@ MONGO_COLLECTION = "logs"
 
 mongo_client = pymongo.MongoClient(MONGO_URI)
 logs_collection = mongo_client[MONGO_DATABASE][MONGO_COLLECTION]
+state_condition = threading.Condition()
+purge_in_progress = False
+active_ingests = 0
 
 def send_with_length(conn, message):
     encoded_message = message.encode(FORMAT)
@@ -54,10 +59,58 @@ def connect_to_rabbitmq():
 
     channel = connection.channel()
 
-    # temp
-    channel.queue_declare(queue=INGEST_QUEUE)
+    channel.queue_declare(queue=INGEST_QUEUE, durable=True)
 
     return connection, channel
+
+def publish_log_message(channel, ingestion_id, line_number, raw_line):
+    message = {
+        "ingestion_id": ingestion_id,
+        "line_number": line_number,
+        "raw_line": raw_line
+    }
+
+    channel.basic_publish(exchange="", routing_key=INGEST_QUEUE, body=json.dumps(message), properties=pika.BasicProperties(delivery_mode=2))
+
+def begin_ingest():
+    global active_ingests
+
+    with state_condition:
+        if purge_in_progress:
+            return False
+
+        active_ingests += 1
+        return True
+
+def end_ingest():
+    global active_ingests
+
+    with state_condition:
+        active_ingests -= 1
+
+        if active_ingests == 0:
+            state_condition.notify_all()
+
+def begin_purge():
+    global purge_in_progress
+
+    with state_condition:
+        if purge_in_progress:
+            return False
+
+        purge_in_progress = True
+
+        while active_ingests > 0:
+            state_condition.wait()
+
+        return True
+
+def end_purge():
+    global purge_in_progress
+
+    with state_condition:
+        purge_in_progress = False
+        state_condition.notify_all()
 
 def perform_purge():
     rabbit_connection = None
@@ -207,7 +260,7 @@ def search_logs_by_keyword(keyword):
         }
     })
 
-    matches =[]
+    matches = []
 
     for index, log in enumerate(results, start=1):
         line = (
@@ -262,6 +315,7 @@ QUERY_HANDLERS = {
 
 def handle_client(conn, addr):
     rabbit_connection = None
+    ingest_started = False
 
     try:
         command = conn.recv(SIZE).decode(FORMAT).strip()
@@ -325,6 +379,10 @@ def handle_client(conn, addr):
                 send_with_length(conn, "[ERROR] Invalid PURGE command.")
                 return
 
+            if not begin_purge():
+                send_with_length(conn, "[ERROR] Another purge is already in progress.")
+                return
+            
             try:
                 queued_deleted, stored_deleted = perform_purge()
 
@@ -341,12 +399,21 @@ def handle_client(conn, addr):
                 print(f"[PURGE ERROR] {error}")
                 response = "[ERROR] Purge failed because of an internal error."
 
+            finally:
+                end_purge()
+
             send_with_length(conn, response)
             return
         
         if action != "INGEST":
             send_with_length(conn, f"[ERROR] Unknown command '{action}'.")
             return
+
+        if not begin_ingest():
+            conn.sendall("[ERROR] Purge is currently in progress. Try again shortly.".encode(FORMAT))
+            return
+
+        ingest_started = True
 
         rabbit_connection, channel = connect_to_rabbitmq()
         channel.confirm_delivery()
@@ -377,24 +444,14 @@ def handle_client(conn, addr):
 
                 if line:
                     queued_count += 1
-                    message = {
-                        "ingestion_id": ingestion_id,
-                        "line_number": queued_count,
-                        "raw_line": line
-                    }
-                    channel.basic_publish(exchange="", routing_key=INGEST_QUEUE, body=json.dumps(message))
+                    publish_log_message(channel, ingestion_id, queued_count, line)
                     
 
             if upload_finished: break
 
         if buffer.strip():
             queued_count += 1
-            message = {
-                "ingestion_id": ingestion_id,
-                "line_number": queued_count,
-                "raw_line": buffer.strip()
-            }
-            channel.basic_publish(exchange="", routing_key=INGEST_QUEUE, body=json.dumps(message))
+            publish_log_message(channel, ingestion_id, queued_count, buffer.strip())
 
         response = (
             f"[SUCCESS] File received. "
@@ -417,6 +474,8 @@ def handle_client(conn, addr):
     finally:
         if rabbit_connection and rabbit_connection.is_open:
             rabbit_connection.close()
+        if ingest_started:
+            end_ingest()
         conn.close()
 
 def start_gateway():
@@ -434,7 +493,8 @@ def start_gateway():
 
             thread = threading.Thread(
                 target=handle_client,
-                args=(conn, addr)
+                args=(conn, addr),
+                daemon=True
             )
             thread.start()
 
@@ -442,6 +502,7 @@ def start_gateway():
         print("\n[SHUTDOWN] Gateway stopped.")
     finally:
         gateway.close()
+        mongo_client.close()
 
 if __name__ == "__main__":
     start_gateway()

@@ -72,7 +72,7 @@ def save_to_mongo(parsed_log, ingestion_id, line_number, raw_line):
     parsed_log["ingestion_id"] = ingestion_id
     parsed_log["line_number"] = line_number
     parsed_log["raw_line"] = raw_line
-    
+
     try:
         logs_collection.insert_one(parsed_log)
         return True
@@ -134,7 +134,7 @@ def main():
         connection = pika.BlockingConnection(
             pika.ConnectionParameters(RABBITMQ_HOST, 5672, '/', credentials))
         channel = connection.channel()
-        channel.queue_declare(queue='ingest_queue')
+        channel.queue_declare(queue='ingest_queue', durable=True)
         channel.queue_declare(queue=PURGE_ACK_QUEUE)
 
         # process one message at a time per worker, so work spreads across workers
