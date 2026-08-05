@@ -27,6 +27,7 @@ WORKER_ID = os.getenv("WORKER_ID", f"worker-{os.getpid()}")
 INGEST_CONSUMER_TAG = "ingest-consumer"
 
 paused = False
+processed_count = 0
 
 def send_control_ack(channel, status):
     response = {
@@ -83,7 +84,7 @@ def save_to_mongo(parsed_log, ingestion_id, line_number, raw_line):
         return False
 
 def callback(ch, method, properties, body):
-    global paused
+    global paused, processed_count
     if paused:
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
         return
@@ -97,12 +98,15 @@ def callback(ch, method, properties, body):
     parsed = parse_syslog_line(raw_line)
 
     if parsed:
-        ## Just to check the lines being processed
-        print(f"[PID {os.getpid()}] processing: {parsed['host']} - {parsed['message'][:50]}")
         saved = save_to_mongo(parsed, ingestion_id, line_number, raw_line)
         if not saved:
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
             return
+        processed_count += 1
+        if processed_count <= 50:
+             print(f"[PID {os.getpid()}] processing: {parsed['host']} - {parsed['message'][:50]}")
+        elif processed_count % 1000 == 0:
+            print(f"[PID {os.getpid()}] ... {processed_count} lines processed so far ...")
     # only ack AFTER the save — this is what makes it survive a crash mid-job
     ch.basic_ack(delivery_tag=method.delivery_tag)
 

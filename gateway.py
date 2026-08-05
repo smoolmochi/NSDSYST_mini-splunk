@@ -24,7 +24,7 @@ RABBITMQ_PASSWORD = os.getenv("RABBITMQ_PASSWORD", "rabbit1234")
 INGEST_QUEUE = "ingest_queue"
 PURGE_EXCHANGE = "purge_control"
 PURGE_ACK_QUEUE = "purge_ack_queue"
-EXPECTED_WORKERS = int(os.getenv("EXPECTED_WORKERS", "1"))
+#EXPECTED_WORKERS = int(os.getenv("EXPECTED_WORKERS", "1"))
 PURGE_TIMEOUT_SECONDS = float(os.getenv("PURGE_TIMEOUT_SECONDS", "10"))
 
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://127.0.0.1:27017")
@@ -121,18 +121,31 @@ def perform_purge():
     try:
         rabbit_connection, channel = connect_to_rabbitmq()
 
+        try:
+            queue_info = channel.queue_declare(queue=INGEST_QUEUE, passive=True, durable=True)
+            expected_workers = queue_info.method.consumer_count
+        except pika.exceptions.ChannelClosedByBroker:
+            # Queue doesn't exist yet (no INGEST has ever run) — nothing to lock.
+            expected_workers = 0
+            rabbit_connection, channel = connect_to_rabbitmq()  # channel closes on error, reopen
+
+        print(f"[PURGE] Detected {expected_workers} active worker(s).")
+
         channel.exchange_declare(exchange=PURGE_EXCHANGE, exchange_type="fanout")
         channel.queue_declare(queue=PURGE_ACK_QUEUE)
-        channel.queue_purge(queue=PURGE_ACK_QUEUE) # remove acks from previous
+        channel.queue_purge(queue=PURGE_ACK_QUEUE)
         channel.basic_publish(exchange=PURGE_EXCHANGE, routing_key="", body="LOCK")
         lock_sent = True
 
-        print("[PURGE] Lock sent. Waiting for workers...")
+        if expected_workers == 0:
+            print("[PURGE] No active workers — skipping lock wait.")
+        else:
+            print("[PURGE] Lock sent. Waiting for workers...")
 
         locked_workers = set()
         deadline = time.time() + PURGE_TIMEOUT_SECONDS
 
-        while (len(locked_workers) < EXPECTED_WORKERS and time.time() < deadline):
+        while (len(locked_workers) < expected_workers and time.time() < deadline):
             method, properties, body = channel.basic_get(queue=PURGE_ACK_QUEUE, auto_ack=False)
 
             if method is None:
@@ -150,7 +163,7 @@ def perform_purge():
 
             channel.basic_ack(delivery_tag=method.delivery_tag)
 
-        if len(locked_workers) < EXPECTED_WORKERS:
+        if len(locked_workers) < expected_workers:
             raise TimeoutError("Not all workers confirmed LOCK.")
 
         # delete messages that have not reached a worker

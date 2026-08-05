@@ -1,3 +1,31 @@
 Feb  7 16:03:34 SYSSVR1 sshd[1032662]: Accepted password for user27
 Feb  7 16:04:10 SYSSVR1 sshd[1032663]: Failed password for root
 Feb  7 16:05:20 SYSSVR2 systemd[1]: Started Daily apt download activities
+Feb  7 16:03:34 SYSSVR1 sshd[1032662]: Accepted password for lbysyads20user27 from 152.32.96.21 port 18439 ssh2
+Feb  7 16:03:34 SYSSVR1 sshd[1032662]: pam_unix(sshd:session): session opened for user lbysyads20user27(uid=1401) by (uid=0)
+Feb  7 16:03:34 SYSSVR1 systemd-logind[102]: New session 9586 of user lbysyads20user27.
+Feb  7 16:03:34 SYSSVR1 systemd: pam_unix(systemd-user:session): session opened for user lbysyads20user27(uid=1401) by (uid=0)
+Feb  7 16:13:54 SYSSVR1 sshd[1029606]: pam_unix(sshd:session): session closed for user lbysyads19user04
+Feb  7 16:13:54 SYSSVR1 systemd-logind[102]: Removed session 9504.
+Feb  7 16:13:54 SYSSVR1 systemd-logind[102]: Session 9504 logged out. Waiting for processes to exit.
+Feb  7 16:37:01 SYSSVR1 CRON[1032792]: pam_unix(cron:session): session closed for user root
+Feb  7 16:37:01 SYSSVR1 CRON[1032792]: pam_unix(cron:session): session opened for user root(uid=0) by (uid=0)
+Feb  7 17:06:20 SYSSVR1 sshd[1029264]: pam_unix(sshd:session): session closed for user lbysyads16user06
+Feb  7 17:06:20 SYSSVR1 systemd-logind[102]: Removed session 9495.
+Feb  7 17:06:20 SYSSVR1 systemd-logind[102]: Session 9495 logged out. Waiting for processes to exit.
+Feb  7 17:06:30 SYSSVR1 systemd: pam_unix(systemd-user:session): session closed for user lbysyads16user06
+Feb  7 17:13:59 SYSSVR1 sshd[1030516]: pam_unix(sshd:session): session closed for user lbysyads16user14
+Feb  7 17:13:59 SYSSVR1 systemd-logind[102]: Removed session 9529.
+Feb  7 17:13:59 SYSSVR1 systemd-logind[102]: Session 9529 logged out. Waiting for processes to exit.
+Feb  7 17:25:27 SYSSVR1 sshd[1031189]: pam_unix(sshd:session): session closed for user lbysyads16user02
+Feb  7 17:25:27 SYSSVR1 systemd-logind[102]: Removed session 9553.
+Feb  7 17:25:27 SYSSVR1 systemd-logind[102]: Session 9553 logged out. Waiting for processes to exit.
+Feb  7 17:32:11 SYSSVR1 sshd[1032812]: banner exchange: Connection from 147.185.132.127 port 50168: invalid format
+Feb  7 17:32:11 SYSSVR1 sshd[1032812]: error: kex_exchange_identification: client sent invalid protocol identifier "GET / HTTP/1.0"
+Feb  7 17:32:29 SYSSVR1 sshd[1031748]: pam_unix(sshd:session): session closed for user lbysyads16user01
+Feb  7 17:32:29 SYSSVR1 systemd-logind[102]: Removed session 9559.
+Feb  7 17:32:29 SYSSVR1 systemd-logind[102]: Session 9559 logged out. Waiting for processes to exit.
+Feb  7 17:33:11 SYSSVR1 sshd[1032815]: banner exchange: Connection from 147.185.132.127 port 63780: invalid format
+Feb  7 17:33:11 SYSSVR1 sshd[1032815]: error: kex_exchange_identification: banner line contains invalid characters
+Feb  7 17:33:34 SYSSVR1 sshd[1032817]: Connection reset by 147.185.132.127 port 59342
+Feb  7 17:33:34 SYSSVR1 sshd[1032817]: error: kex_exchange_identification: read: Connection reset by peer
