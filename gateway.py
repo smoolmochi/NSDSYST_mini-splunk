@@ -6,14 +6,16 @@ import re
 import shlex
 import time
 import json
+import uuid
+import os
 
 HOST = "0.0.0.0"
 PORT = 8080
 SIZE = 1024
 FORMAT = "utf-8"
 
-RABBITMQ_HOST = "127.0.0.1"
-RABBITMQ_PORT = 5672
+RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "127.0.0.1")
+RABBITMQ_PORT = int(os.getenv("RABBITMQ_PORT", "5672"))
 RABBITMQ_USER = "rabbituser"
 RABBITMQ_PASSWORD = "rabbit1234"
 
@@ -23,7 +25,7 @@ PURGE_ACK_QUEUE = "purge_ack_queue"
 EXPECTED_WORKERS = 1
 PURGE_TIMEOUT_SECONDS = 10
 
-MONGO_URI = "mongodb://127.0.0.1:27017"
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://127.0.0.1:27017")
 MONGO_DATABASE = "mini_splunk"
 MONGO_COLLECTION = "logs"
 
@@ -188,7 +190,7 @@ def search_logs_by_date(date_term):
         line = (
             f"{index}. {log['timestamp']} "
             f"{log['host']} "
-            f"{log['daemon']} "
+            f"{log['daemon']}: "
             f"{log['message']}"
         )
         matches.append(line)
@@ -351,6 +353,8 @@ def handle_client(conn, addr):
 
         conn.sendall("READY_FOR_FILE".encode(FORMAT))
 
+        ingestion_id = str(uuid.uuid4())
+
         buffer = ""
         queued_count = 0
 
@@ -372,26 +376,30 @@ def handle_client(conn, addr):
                 line = line.strip()
 
                 if line:
-                    channel.basic_publish(
-                        exchange="",
-                        routing_key=INGEST_QUEUE,
-                        body=line
-                    )
                     queued_count += 1
+                    message = {
+                        "ingestion_id": ingestion_id,
+                        "line_number": queued_count,
+                        "raw_line": line
+                    }
+                    channel.basic_publish(exchange="", routing_key=INGEST_QUEUE, body=json.dumps(message))
+                    
 
             if upload_finished: break
 
         if buffer.strip():
-            channel.basic_publish(
-                exchange="",
-                routing_key=INGEST_QUEUE,
-                body=buffer.strip()
-            )
             queued_count += 1
+            message = {
+                "ingestion_id": ingestion_id,
+                "line_number": queued_count,
+                "raw_line": buffer.strip()
+            }
+            channel.basic_publish(exchange="", routing_key=INGEST_QUEUE, body=json.dumps(message))
 
         response = (
             f"[SUCCESS] File received. "
-            f"{queued_count:,} log lines sent to RabbitMQ."
+            f"{queued_count:,} log lines sent to RabbitMQ. "
+            f"Ingestion ID: {ingestion_id}"
         )
 
         send_with_length(conn, response)

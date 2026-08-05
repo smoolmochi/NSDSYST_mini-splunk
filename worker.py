@@ -7,6 +7,7 @@ import hashlib
 import os
 
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "127.0.0.1")
+RABBITMQ_PORT = int(os.getenv("RABBITMQ_PORT", "5672"))
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://127.0.0.1:27017")
 
 mongo_client = pymongo.MongoClient(MONGO_URI)
@@ -64,8 +65,14 @@ def parse_syslog_line(line):
         "message": data['message']
     }
 
-def save_to_mongo(parsed_log, raw_line):
-    parsed_log["_id"] = hashlib.sha256(raw_line.encode()).hexdigest()
+def save_to_mongo(parsed_log, ingestion_id, line_number, raw_line):
+    unique_value = (f"{ingestion_id}:{line_number}:{raw_line}")
+    parsed_log["_id"] = hashlib.sha256(unique_value.encode()).hexdigest()
+
+    parsed_log["ingestion_id"] = ingestion_id
+    parsed_log["line_number"] = line_number
+    parsed_log["raw_line"] = raw_line
+    
     try:
         logs_collection.insert_one(parsed_log)
         return True
@@ -81,13 +88,18 @@ def callback(ch, method, properties, body):
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
         return
     
-    line = body.decode("utf-8")
-    parsed = parse_syslog_line(line)
+    payload = json.loads(body.decode("utf-8"))
+
+    ingestion_id = payload["ingestion_id"]
+    line_number = payload["line_number"]
+    raw_line = payload["raw_line"]
+
+    parsed = parse_syslog_line(raw_line)
 
     if parsed:
         ## Just to check the lines being processed
         print(f"[PID {os.getpid()}] processing: {parsed['host']} - {parsed['message'][:50]}")
-        saved = save_to_mongo(parsed, line)
+        saved = save_to_mongo(parsed, ingestion_id, line_number, raw_line)
         if not saved:
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
             return
@@ -137,7 +149,7 @@ def main():
         
         print(" [*] Worker ready, waiting for log lines...")
         channel.start_consuming()
-        
+
     except KeyboardInterrupt:
         print("\n[SHUTDOWN] Worker interrupted by user.")
 
