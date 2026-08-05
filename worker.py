@@ -7,6 +7,7 @@ import hashlib
 import os
 
 mongo_client = pymongo.MongoClient("mongodb://127.0.0.1:27017")
+# pymongo.MongoClient("mongodb://MONGODB_VM_IP:27017")
 db = mongo_client["mini_splunk"]
 logs_collection = db["logs"]
 
