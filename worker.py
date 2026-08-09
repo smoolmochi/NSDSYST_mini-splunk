@@ -5,6 +5,7 @@ import pymongo
 from pymongo.errors import DuplicateKeyError
 import hashlib
 import os
+import socket
 
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "127.0.0.1")
 RABBITMQ_PORT = int(os.getenv("RABBITMQ_PORT", "5672"))
@@ -23,7 +24,14 @@ SYSLOG_PATTERN = re.compile(
 
 PURGE_EXCHANGE = "purge_control"  #change to whatever
 PURGE_ACK_QUEUE = "purge_ack_queue"
-WORKER_ID = os.getenv("WORKER_ID", f"worker-{os.getpid()}")
+
+# Fixed: PID is always 1 inside a container, so every scaled replica would
+# collide on the same fallback ID. Use the container's hostname instead --
+# Docker Compose gives each scaled replica its own unique hostname
+# automatically (e.g. worker-<random>), so this stays unique no matter how
+# many copies are running.
+WORKER_ID = os.getenv("WORKER_ID", f"worker-{socket.gethostname()}")
+
 INGEST_CONSUMER_TAG = "ingest-consumer"
 
 paused = False
@@ -47,7 +55,7 @@ def parse_syslog_line(line):
     is_match = SYSLOG_PATTERN.match(line)
     if not is_match:
         return None
-    
+
     data = is_match.groupdict()
 
     msg_upper = data['message'].upper()
@@ -57,7 +65,7 @@ def parse_syslog_line(line):
         severity = "WARNING"
     else:
         severity = "INFO"
-    
+
     return {
         "timestamp": data['timestamp'],
         "host": data['host'],
@@ -88,7 +96,7 @@ def callback(ch, method, properties, body):
     if paused:
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
         return
-    
+
     payload = json.loads(body.decode("utf-8"))
 
     ingestion_id = payload["ingestion_id"]
@@ -104,9 +112,9 @@ def callback(ch, method, properties, body):
             return
         processed_count += 1
         if processed_count <= 50:
-             print(f"[PID {os.getpid()}] processing: {parsed['host']} - {parsed['message'][:50]}")
+             print(f"[{WORKER_ID}] processing: {parsed['host']} - {parsed['message'][:50]}")
         elif processed_count % 1000 == 0:
-            print(f"[PID {os.getpid()}] ... {processed_count} lines processed so far ...")
+            print(f"[{WORKER_ID}] ... {processed_count} lines processed so far ...")
     # only ack AFTER the save — this is what makes it survive a crash mid-job
     ch.basic_ack(delivery_tag=method.delivery_tag)
 
@@ -114,7 +122,7 @@ def control_callback(ch, method, properties, body):
     global paused
 
     command = body.decode("utf-8").strip().upper()
- 
+
     if command == "LOCK" and not paused:
         paused = True
         ch.basic_cancel(consumer_tag=INGEST_CONSUMER_TAG)
@@ -126,7 +134,7 @@ def control_callback(ch, method, properties, body):
         ch.basic_consume(queue="ingest_queue", on_message_callback=callback, auto_ack=False, consumer_tag=INGEST_CONSUMER_TAG)
         print(" [*] PURGE finished — ingest consumer resumed")
         send_control_ack(ch, "UNLOCKED")
-        
+
     else:
         print(f" [?] Unrecognized control message: {command}")
 
@@ -136,7 +144,7 @@ def main():
     try:
         credentials = pika.PlainCredentials('rabbituser', 'rabbit1234')
         connection = pika.BlockingConnection(
-            pika.ConnectionParameters(RABBITMQ_HOST, 5672, '/', credentials))
+            pika.ConnectionParameters(RABBITMQ_HOST, RABBITMQ_PORT, '/', credentials))
         channel = connection.channel()
         channel.queue_declare(queue='ingest_queue', durable=True)
         channel.queue_declare(queue=PURGE_ACK_QUEUE)
@@ -150,8 +158,8 @@ def main():
         control_queue_name = result.method.queue
         channel.queue_bind(exchange=PURGE_EXCHANGE, queue=control_queue_name)
         channel.basic_consume(queue=control_queue_name, on_message_callback=control_callback, auto_ack=True)
-        
-        print(" [*] Worker ready, waiting for log lines...")
+
+        print(f" [*] Worker ready as {WORKER_ID}, waiting for log lines...")
         channel.start_consuming()
 
     except KeyboardInterrupt:

@@ -153,32 +153,11 @@ services:
       retries: 15
       start_period: 20s
 
+# ---------------------------------------------------------------
+  # Stage 1: initiate replica sets — runs BEFORE mongos, since mongos
+  # can't become healthy until csrs already has an elected primary.
   # ---------------------------------------------------------------
-  # mongos - the query router / scatter-gather layer the Gateway talks to
-  # ---------------------------------------------------------------
-  mongos:
-    image: mongo:7.0
-    <<: *restart-policy
-    command: ["mongos", "--configdb", "csrs/configsvr1:27019,configsvr2:27019,configsvr3:27019", "--port", "27017", "--bind_ip_all"]
-    depends_on:
-      configsvr1: {condition: service_healthy}
-      configsvr2: {condition: service_healthy}
-      configsvr3: {condition: service_healthy}
-    ports:
-      - "${MONGOS_PORT:-27017}:27017"
-    networks: [minisplunk-net]
-    healthcheck:
-      test: ["CMD", "mongosh", "--port", "27017", "--quiet", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
-      timeout: 5s
-      retries: 15
-      start_period: 20s
-
-  # ---------------------------------------------------------------
-  # One-shot cluster bootstrap: initiates replica sets, adds shards,
-  # enables sharding on mini_splunk.logs (hashed _id).
-  # ---------------------------------------------------------------
-  mongo-init:
+  mongo-init-rs:
     image: mongo:7.0
     restart: "no"
     depends_on:
@@ -191,12 +170,40 @@ services:
       shard2a: {condition: service_healthy}
       shard2b: {condition: service_healthy}
       shard2c: {condition: service_healthy}
+    volumes:
+      - ./init-replicasets.sh:/init-replicasets.sh:ro
+    networks: [minisplunk-net]
+    entrypoint: ["bash", "/init-replicasets.sh"]
+
+  mongos:
+    image: mongo:7.0
+    <<: *restart-policy
+    command: ["mongos", "--configdb", "csrs/configsvr1:27019,configsvr2:27019,configsvr3:27019", "--port", "27017", "--bind_ip_all"]
+    depends_on:
+      mongo-init-rs: {condition: service_completed_successfully}
+    ports:
+      - "${MONGOS_PORT:-27017}:27017"
+    networks: [minisplunk-net]
+    healthcheck:
+      test: ["CMD", "mongosh", "--port", "27017", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+
+  # ---------------------------------------------------------------
+  # Stage 2: register shards + shard the collection — runs AFTER
+  # mongos is healthy.
+  # ---------------------------------------------------------------
+  mongo-init-shards:
+    image: mongo:7.0
+    restart: "no"
+    depends_on:
       mongos: {condition: service_healthy}
     volumes:
-      - ./init-cluster.sh:/init-cluster.sh:ro
+      - ./init-shards.sh:/init-shards.sh:ro
     networks: [minisplunk-net]
-    entrypoint: ["bash", "-c", "sed -i 's/\\r$$//' /init-cluster.sh && bash /init-cluster.sh"]
-
+    entrypoint: ["bash", "/init-shards.sh"]
   # ---------------------------------------------------------------
   # RabbitMQ - IPC layer between Gateway and Worker nodes
   # ---------------------------------------------------------------
@@ -235,64 +242,32 @@ services:
       RABBITMQ_USER: ${RABBITMQ_USER:-rabbituser}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-rabbit1234}
       MONGO_URI: mongodb://mongos:27017/mini_splunk
-      EXPECTED_WORKERS: ${EXPECTED_WORKERS:-3}
       PURGE_TIMEOUT_SECONDS: ${PURGE_TIMEOUT_SECONDS:-15}
     ports:
       - "${GATEWAY_PORT:-8080}:8080"
     depends_on:
       rabbitmq: {condition: service_healthy}
-      mongo-init: {condition: service_completed_successfully}
+      mongo-init-shards: {condition: service_completed_successfully}
     networks: [minisplunk-net]
 
+ # ---------------------------------------------------------------
+  # Worker nodes - scaled on demand, not fixed at 3.
+  # Run more/fewer with: docker compose up -d --scale worker=N
   # ---------------------------------------------------------------
-  # Worker nodes - fixed count so EXPECTED_WORKERS on the Gateway
-  # (used for the PURGE distributed-lock handshake) stays accurate.
-  # ---------------------------------------------------------------
-  worker1:
+  worker:
     build:
       context: .
       dockerfile: Dockerfile.worker
     <<: *restart-policy
     environment:
-      WORKER_ID: worker-1
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: 5672
       MONGO_URI: mongodb://mongos:27017/mini_splunk
     depends_on:
       rabbitmq: {condition: service_healthy}
-      mongo-init: {condition: service_completed_successfully}
+      mongo-init-shards: {condition: service_completed_successfully}
     networks: [minisplunk-net]
-
-  worker2:
-    build:
-      context: .
-      dockerfile: Dockerfile.worker
-    <<: *restart-policy
-    environment:
-      WORKER_ID: worker-2
-      RABBITMQ_HOST: rabbitmq
-      RABBITMQ_PORT: 5672
-      MONGO_URI: mongodb://mongos:27017/mini_splunk
-    depends_on:
-      rabbitmq: {condition: service_healthy}
-      mongo-init: {condition: service_completed_successfully}
-    networks: [minisplunk-net]
-
-  worker3:
-    build:
-      context: .
-      dockerfile: Dockerfile.worker
-    <<: *restart-policy
-    environment:
-      WORKER_ID: worker-3
-      RABBITMQ_HOST: rabbitmq
-      RABBITMQ_PORT: 5672
-      MONGO_URI: mongodb://mongos:27017/mini_splunk
-    depends_on:
-      rabbitmq: {condition: service_healthy}
-      mongo-init: {condition: service_completed_successfully}
-    networks: [minisplunk-net]
-
+    
   # ---------------------------------------------------------------
   # Client - interactive CLI, run on demand (not part of `up`):
   #   docker compose run --rm client
