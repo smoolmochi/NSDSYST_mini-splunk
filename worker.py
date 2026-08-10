@@ -25,11 +25,6 @@ SYSLOG_PATTERN = re.compile(
 PURGE_EXCHANGE = "purge_control"  #change to whatever
 PURGE_ACK_QUEUE = "purge_ack_queue"
 
-# Fixed: PID is always 1 inside a container, so every scaled replica would
-# collide on the same fallback ID. Use the container's hostname instead --
-# Docker Compose gives each scaled replica its own unique hostname
-# automatically (e.g. worker-<random>), so this stays unique no matter how
-# many copies are running.
 WORKER_ID = os.getenv("WORKER_ID", f"worker-{socket.gethostname()}")
 
 INGEST_CONSUMER_TAG = "ingest-consumer"
